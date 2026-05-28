@@ -74,6 +74,8 @@ def f3_tot_fast(x):
         total += 1000 * val**2
         
     return total
+
+
 def obj_base():
     
     return 0
