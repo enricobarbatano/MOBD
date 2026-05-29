@@ -1,0 +1,242 @@
+0) Nota di conformità (importante per il progetto)
+
+La traccia dice che non puoi usare nel codice il simulatore con -t e che i metodi di ottimizzazione non vanno presi da librerie (“non è possibile usare metodi da altre librerie”).
+👉 Quindi: ok usare PyTorch/Keras/Numpy per la rete (come ti è stato detto “Big Data”), ma per stare tranquillo:
+
+implementa tu L‑BFGS (anche se usi PyTorch per autograd), invece di usare torch.optim.LBFGS.
+in ottimizzazione usa il simulatore solo per f4f_4f4​ (-b), e calcola tu f1,f2,f3f_1,f_2,f_3f1​,f2​,f3​.
+
+
+
+
+1) La tua pipeline va bene, ma migliorala in 3 modi
+La tua lista 1→8 è corretta come struttura. Io la renderei più “robusta” così:
+(A) Non addestrare f^4\widehat f_4f​4​ in tutto [−300,300]2000[-300,300]^{2000}[−300,300]2000: addestralo solo vicino alle elite
+In 2000D, un dataset “generico” non basta mai: il modello impara male. Quello che ti serve è accuratezza locale vicino al bacino del best (dove vuoi battere il lower bound).
+(B) Scegli una rete permutationally aware (stile DeepSets) invece di un MLP 2000→…
+Un MLP diretto su 2000 feature funziona, ma tende a:
+
+overfittare,
+generalizzare male,
+richiedere dataset enorme.
+
+Invece, sfrutta la struttura naturale: hai m=1000m=1000m=1000 elementi simili (xi,yi)(x_i,y_i)(xi​,yi​).
+Quindi usa una rete tipo:
+f^4(x)=ρ ⁣(∑i=1mϕ(xi))\widehat f_4(x) = \rho\!\left(\sum_{i=1}^{m} \phi(x_i)\right)f​4​(x)=ρ(i=1∑m​ϕ(xi​))
+dove ϕ\phiϕ è una piccola MLP 2→d e ρ\rhoρ è una MLP d→1.
+È più stabile, scala meglio e “impara” pattern globali da aggregazione.
+(C) Fai active learning / retraining iterativo
+Per arrivare davvero vicino al best:
+
+addestra f^4\widehat f_4f​4​,
+ottimizza F^\widehat FF con L‑BFGS,
+valuta il candidato col simulatore vero (solo f4f_4f4​),
+aggiungi quel punto al dataset,
+riaddestra,
+ripeti finché migliora.
+
+Questo è l’equivalente pratico di “model management” (stile trust region), e ti protegge dagli errori del surrogato. È coerente con l’idea dei metodi basati su modello e con la necessità di validare sul vero FFF.
+
+2) Fase 1 — “Punti per addestrare la rete”: cosa generare davvero
+La tua idea “ottimizzare f1,f2,f3f_1,f_2,f_3f1​,f2​,f3​ per avere punti” è ok come una fonte, ma non basta. Il dataset migliore per f^4\widehat f_4f​4​ deve coprire il manifold locale attorno alle soluzioni buone.
+Dataset consigliato (molto efficace)
+Parti da un set di soluzioni elite E\mathcal{E}E (per esempio le migliori 20–50 che hai già trovato con SA/elite-based). Per ciascuna x(e)∈Ex^{(e)}\in\mathcal{E}x(e)∈E:
+2.1 Perturbazioni multi-scala (fondamentale)
+Genera campioni:
+
+tiny: sigma 0.5–2.0, frazione moduli 1–5%
+small: sigma 2–5, frazione 5–10%
+medium: sigma 5–10, frazione 10–20%
+
+Questo ti dà densità locale dove serve e un po’ di esplorazione.
+2.2 Campioni “structured” utili per f4f_4f4​
+Senza conoscere f4f_4f4​, puoi comunque ipotizzare che molti fenomeni dipendano da:
+
+densità locale (cluster)
+distanza da stazioni zqz_qzq​
+pattern di vicinanza tra moduli
+
+Quindi aggiungi perturbazioni che:
+
+spostano piccoli cluster di moduli insieme,
+“compattano” o “allargano” gruppi locali.
+
+2.3 Punti da “ottimizzazione f1+f2+f3f_1+f_2+f_3f1​+f2​+f3​” (come dicevi tu)
+Sì, puoi generare anche:
+
+soluzioni ottime/near-ottime per f1+f2+f3f_1+f_2+f_3f1​+f2​+f3​
+e poi perturbare anche quelle
+per dare varietà. Ma non deve essere la parte principale se il tuo obiettivo è migliorare il lower bound: la regione migliore è quella già trovata dalla ricerca completa.
+
+
+3) Fase 2 — “Preparare i punti da dare a f4f_4f4​” e generare output
+Qui basta essere rigorosi:
+
+dataset: {(x(j),y(j))}\{(x^{(j)}, y^{(j)})\}{(x(j),y(j))} con y(j)=f4(x(j))y^{(j)} = f_4(x^{(j)})y(j)=f4​(x(j)) ottenuto dal simulatore deterministico.
+memorizza anche f1,f2,f3f_1,f_2,f_3f1​,f2​,f3​ se vuoi analisi, ma il target NN è f4f_4f4​.
+
+Suggerimento pratico: salva in .npz:
+
+X: shape (N, 2000)
+y4: shape (N,)
+(opzionale) meta: provenienza (elite id, sigma, frac)
+
+
+4) Fase 3–4 — Training della rete: cosa fare per ottenere “f^4\widehat f_4f​4​ molto vicina”
+4.1 Normalizzazione (necessaria)
+
+normalizza input: coordinate in [-300,300] ⇒ scala in [-1,1] dividendo per 300
+normalizza target f4f_4f4​: spesso conviene predire log⁡(f4+ϵ)\log(f_4+\epsilon)log(f4​+ϵ) se i valori variano molto
+
+4.2 Loss e regolarizzazione
+
+loss principale: MSE su f4f_4f4​
+weight decay (L2)
+early stopping su validation set
+
+4.3 Split train/val “serio”
+Non fare split casuale puro se i punti sono perturbazioni dello stesso elite: rischi leakage.
+Meglio:
+
+split per gruppo (elite-based split): alcune elite in train, altre in val
+oppure
+cluster per similarità e fai split per cluster.
+
+
+5) Fase 5 — “Congelare la rete e rendere input parametro”
+Qui l’idea è giusta, ma attenzione al vincolo sui bounds.
+Il tuo xxx deve restare in [−300,300][-300,300][−300,300]. Due scelte robuste:
+(A) Proiezione dopo ogni step
+Dopo ogni update di L‑BFGS:
+x←Π[−300,300](x)x \leftarrow \Pi_{[-300,300]}(x)x←Π[−300,300]​(x)
+(B) Parametrizzazione senza vincoli (consigliata)
+Ottimizzi una variabile libera u∈R2000u\in\mathbb{R}^{2000}u∈R2000 e mappi:
+x(u)=300tanh⁡(u)x(u) = 300 \tanh(u)x(u)=300tanh(u)
+Così xxx è sempre nei bound.
+
+6) Fase 6 — Loss totale
+Come scrivi tu:
+L(x)=f1(x)+f2(x)+f3(x)+f^4(x)\mathcal{L}(x)=f_1(x)+f_2(x)+f_3(x)+\widehat f_4(x)L(x)=f1​(x)+f2​(x)+f3​(x)+f​4​(x)
+✔️ Questa loss è differenziabile (perché f^4\widehat f_4f​4​ lo è), quindi puoi fare backprop.
+Nota: f1f_1f1​ è una somma su coppie (potenzialmente O(m2)O(m^2)O(m2)), quindi se lo calcoli “naively” in torch può essere pesante. Se ti serve performance:
+
+usa cutoff su distanze (l’esponenziale muore)
+o minibatch di coppie (stima stocastica) — ma questo complica L‑BFGS.
+
+
+7) Fase 7 — Minimizzare con L‑BFGS (ma implementato da voi)
+Nel PDF c’è la parte sui quasi‑Newton (BFGS/L‑BFGS) e il senso è esattamente questo: approssimare l’Hessiano (o l’inversa) con memoria limitata, evitando costi proibitivi.
+✅ In pratica:
+
+implementi L‑BFGS “two-loop recursion”
+scegli una line search (anche Armijo) per il passo (coerente col PDF)
+
+Importantissimo: anche se ottimizzi F^\widehat FF, ogni tot iterazioni:
+
+valuti il candidato col simulatore vero (solo f4f_4f4​)
+se migliora FFF reale, lo accetti e aggiorni elite/dataset
+altrimenti restringi step o riaddestra (active learning)
+
+
+8) Fase 8 — “Trovare punto di ottimo”
+Qui la formulazione corretta da paper è:
+
+“si ottiene un punto candidato di minimo locale per la loss surrogata F^\widehat FF e lo si valida sulla funzione reale FFF tramite simulatore, ottenendo un miglior best empirico (lower bound sperimentale).”
+
+Non dire “ottimo globale”, perché non è garantibile.
+
+9) Quello che ti manca per essere davvero “il più vicino possibile” al lower bound
+Se vuoi massimizzare davvero le chance di migliorare ancora:
+(i) Active learning loop (obbligatorio se vuoi spremere)
+
+train → optimize → validate → add data → retrain → repeat
+
+(ii) Target più “facile” da apprendere
+Spesso funziona meglio predire un residuo:
+r(x)=f4(x)−cr(x)=f_4(x)-cr(x)=f4​(x)−c
+dove c=f4(xbest)c=f_4(x_\text{best})c=f4​(xbest​) o la media sui train set.
+Aiuta a stabilizzare training.
+(iii) Architettura DeepSets (2→d, sum, d→1)
+Molto più sample efficient di 2000→… MLP.
+
+
+
+
+
+
+
+
+
+
+
+
+
+Scelta metodologica per la Fase 1: Block Coordinate Descent (Gauss‑Seidel) con Armijo
+Contesto e obiettivo della Fase 1
+Nel progetto MOBD la funzione di costo totale è
+F(x)=f1(x)+f2(x)+f3(x)+f4(x),F(x)=f_1(x)+f_2(x)+f_3(x)+f_4(x),F(x)=f1​(x)+f2​(x)+f3​(x)+f4​(x),
+dove f1,f2,f3f_1,f_2,f_3f1​,f2​,f3​ sono noti in forma analitica e f4f_4f4​ è una componente black‑box deterministica, valutabile esclusivamente tramite simulatore.
+Poiché l’obiettivo complessivo include una parte non accessibile analiticamente, la strategia proposta separa il processo in due fasi: nella Fase 1 si lavora sulla parte strutturata
+g(x)=f1(x)+f2(x)+f3(x),g(x)=f_1(x)+f_2(x)+f_3(x),g(x)=f1​(x)+f2​(x)+f3​(x),
+con lo scopo di generare punti “ragionevoli” e informativi nello spazio delle soluzioni, che verranno poi usati per costruire un dataset supervisionato (x,f4(x))(x, f_4(x))(x,f4​(x)) e addestrare un modello di machine learning capace di approssimare la black‑box. [traccia | PDF]
+Questa impostazione è coerente con la definizione di apprendimento supervisionato come costruzione di un modello input‑output a partire da un training set di coppie (xi,yi)(x_i,y_i)(xi​,yi​), dove qui l’output è yi=f4(xi)y_i=f_4(x_i)yi​=f4​(xi​). [traccia | PDF]
+
+Vincoli computazionali: alta dimensionalità e non convessità
+Il problema ha m=1000m=1000m=1000 moduli, ciascuno con coordinate 2D, quindi la dimensione complessiva è
+n=2m=2000,n=2m=2000,n=2m=2000,
+un regime in cui metodi che richiedono operazioni globali costose ad ogni iterazione possono diventare impraticabili.
+Inoltre, la struttura dei termini di costo (interazioni tra moduli e funzioni non lineari) suggerisce un paesaggio non convesso con molteplici minimi locali. In tali condizioni, i metodi locali non garantiscono l’ottimo globale e la qualità dipende dal punto iniziale; tuttavia rimangono gli strumenti più adatti per esplorare efficientemente regioni promettenti in alta dimensione, soprattutto se combinati con strategie multi‑start. [machine_learning8 | PDF]
+
+Motivazione della scelta: perché un metodo a blocchi (Gauss‑Seidel)
+Le dispense di ottimizzazione distinguono tra metodi globali e metodi locali e sottolineano che, per problemi ad alta dimensione, i metodi locali sono spesso l’unica opzione computazionalmente sostenibile. 
+In questo quadro, i metodi a blocchi (block coordinate descent) sono introdotti come particolarmente indicati quando l’aggiornamento simultaneo di tutte le variabili è troppo costoso: ad ogni iterazione si seleziona un blocco IkI_kIk​ di coordinate e si aggiorna solo quel blocco. [machine_learning8 | PDF] [machine_learning8 | PDF]
+Per MOBD esiste una partizione naturale in blocchi: ogni modulo iii corrisponde a un blocco bidimensionale (xi,yi)(x_i,y_i)(xi​,yi​). Questo consente di:
+
+ridurre drasticamente il costo per iterazione (si opera su 2 variabili invece che su 2000), [machine_learning8 | PDF]
+generare molte più iterazioni (e quindi molti più punti campionati) a parità di tempo, aumentando la quantità e varietà di dati disponibili per addestrare il surrogato di f4f_4f4​. [traccia | PDF], [machine_learning8 | PDF]
+
+Tra le regole di selezione del blocco, la scelta Gauss‑Seidel (ciclica) è la più semplice e stabile: i blocchi vengono aggiornati uno alla volta secondo un ordine prestabilito, e nelle dispense è anche suggerito, in pratica, di effettuare uno shuffle dell’ordine delle variabili ogni epoca per evitare effetti di ordine e migliorare il comportamento empirico. [machine_learning8 | PDF]
+
+Perché Armijo: controllo del passo e robustezza in non convessità
+Una volta selezionato il blocco IkI_kIk​, serve una regola robusta per scegliere l’entità dell’aggiornamento. Le dispense presentano i metodi di line search come una delle tre classi fondamentali dei metodi non vincolati: si sceglie una direzione di discesa e poi un passo αk\alpha_kαk​ tale da garantire un decremento sufficiente della funzione. [machine_learning8 | PDF]
+La line search di Armijo è particolarmente adatta perché:
+
+garantisce terminazione in un numero finito di riduzioni del passo se la direzione è di discesa, [machine_learning8 | PDF]
+produce una successione di valori dell’obiettivo monotona decrescente (almeno localmente rispetto al passo accettato), cosa utile in un contesto non convesso per evitare aggiornamenti troppo aggressivi, [machine_learning8 | PDF]
+non richiede il calcolo di un passo esatto (che sarebbe infattibile in generale). [machine_learning8 | PDF]
+
+Nel nostro caso, dato xkx_kxk​ e il blocco IkI_kIk​, costruiamo una direzione di discesa “a blocchi” usando il gradiente parziale della funzione analitica ggg:
+(dk)j={−∇Ikg(xk)se j∈Ik,0altrimenti,(d_k)_j=
+\begin{cases}
+-\nabla_{I_k} g(x_k) & \text{se } j\in I_k,\\
+0 & \text{altrimenti,}
+\end{cases}(dk​)j​={−∇Ik​​g(xk​)0​se j∈Ik​,altrimenti,​
+e scegliamo αk\alpha_kαk​ con Armijo su ggg, ottenendo xk+1=xk+αkdkx_{k+1}=x_k+\alpha_k d_kxk+1​=xk​+αk​dk​. [machine_learning8 | PDF]
+Questa formulazione ricalca direttamente gli algoritmi di coordinate descent con Armijo presentati nelle dispense, per i quali si ottengono risultati di convergenza (punti di accumulazione stazionari) sotto ipotesi standard. [machine_learning8 | PDF]
+
+Pro della scelta (Gauss‑Seidel a blocchi + Armijo)
+(1) Scalabilità e costo per iterazione ridotto.
+Aggiornare un blocco 2D per modulo riduce il costo rispetto al gradiente completo, rendendo sostenibile lavorare in n=2000n=2000n=2000 dimensioni. Le dispense motivano i metodi a blocchi proprio per questo motivo nei problemi grandi. [machine_learning8 | PDF]
+(2) Generazione efficiente di dati per il surrogato di f4f_4f4​.
+Poiché la Fase 1 serve anche a generare un training set supervisionato (x,f4(x))(x,f_4(x))(x,f4​(x)), avere un metodo che produce molte iterazioni “economiche” consente di raccogliere più campioni dal simulatore nelle regioni visitate dall’ottimizzatore, migliorando la qualità del modello di machine learning. [traccia | PDF], [machine_learning8 | PDF]
+(3) Robustezza del passo tramite Armijo.
+Armijo riduce il rischio di “salti” troppo grandi in un problema non convesso e garantisce una regola di accettazione semplice e teoricamente motivata (terminazione finita se la direzione è di discesa). [machine_learning8 | PDF]
+(4) Coerenza con i contenuti del corso.
+La strategia usa due elementi centrali delle dispense: metodi a blocchi (Gauss‑Seidel) e line search di Armijo, entrambi presentati con risultati di convergenza e motivazioni di costo computazionale. [machine_learning8 | PDF]
+
+Contro e limitazioni (chiarimenti onesti)
+(1) Convergenza potenzialmente lenta in iterazioni.
+Aggiornare poche variabili per volta può richiedere molte iterazioni per ottenere grandi miglioramenti, soprattutto se le interazioni tra variabili sono forti. Questo è il trade‑off tipico dei metodi a blocchi: meno costo per iterazione, più iterazioni totali. [machine_learning8 | PDF]
+(2) Dipendenza dalla regola di selezione del blocco.
+Gauss‑Seidel è semplice, ma non sempre seleziona i blocchi “più utili” in quel momento; una regola greedy (Southwell) potrebbe convergere più rapidamente ma richiede informazioni più costose (es. gradienti globali). Le dispense discutono esplicitamente questo trade‑off. [machine_learning8 | PDF]
+(3) Non convessità: nessuna garanzia di ottimo globale.
+Anche con Armijo, il metodo resta locale: i punti di accumulazione sono stazionari, ma non è garantita l’ottimalità globale in un problema non convesso. [machine_learning8 | PDF]
+(4) “Passo chiuso” non disponibile nel nostro caso.
+Il passo chiuso presente nel codice MATLAB del prof è specifico per funzioni quadratiche; per g=f1+f2+f3g=f_1+f_2+f_3g=f1​+f2​+f3​ non è in generale possibile e Armijo diventa la scelta naturale. [machine_learning8 | PDF]
+
+Implicazione pratica per la Fase 1 (dataset di f4f_4f4​)
+La scelta Gauss‑Seidel a blocchi + Armijo non è finalizzata a “risolvere ggg perfettamente”, ma a:
+
+produrre una sequenza di punti xkx_kxk​ in regioni strutturate e promettenti, [machine_learning8 | PDF]
+campionare su tali punti il simulatore per ottenere f4(xk)f_4(x_k)f4​(xk​) e costruire un dataset supervisionato, [traccia | PDF]
+garantire che i punti del dataset siano “coerenti” con i percorsi di ottimizzazione (punti visitati da un algoritmo locale), aumentando l’utilità del surrogato nella fase successiva di minimizzazione di f1+f2+f3+f^4f_1+f_2+f_3+\widehat f_4f1​+f2​+f3​+f​4​.
