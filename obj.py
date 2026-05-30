@@ -1,6 +1,5 @@
 import subprocess
 import numpy as np
-import math as mt
 from scipy.spatial.distance import pdist
 # definzione della funzione obiettivo sulla base dei costi f1, f2, f3  
 
@@ -92,4 +91,3 @@ def f4():
     result =subprocess.run([r'.\mobd.exe', 'x.txt', '-b'], capture_output=True, text=True)
     return result.stdout
     
-
